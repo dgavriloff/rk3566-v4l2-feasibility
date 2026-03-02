@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Building a V4L2 H.264 encoder driver for the RK3566 is **technically feasible but strategically premature**. The RK3566 contains two encoder blocks: a Hantro VEPU121 (JPEG-only in mainline) and a Rockchip-proprietary RKVENC/VEPU540 (no mainline driver at all). The VEPU540 is the production encoder capable of 1080p60 H.264/H.265. The MPP reference code provides an excellent register-level reference with clean bitfield structures, and the RK3568 TRM Part 2 is publicly available. However, the **V4L2 stateless encoding uAPI itself is still in RFC stage** (most recent: Marco Felsch's VC8000E RFC, May 2025), meaning any driver written today would target an unstable API. Community demand is strong (30+ threads across GitHub, forums, and wikis, driven heavily by Home Assistant Green users), and ~5,000-6,000 lines of new kernel code would be needed. The recommendation is **conditional go**: begin prototyping against the emerging stateless encoder uAPI now, with the expectation of submitting upstream once the uAPI stabilizes, likely in late 2026 or 2027.
+Building a V4L2 H.264 encoder driver for the RK3566 is **technically feasible and worth pursuing now**. The RK3566 contains two encoder blocks: a Hantro VEPU121 (JPEG-only in mainline) and a Rockchip-proprietary RKVENC/VEPU540 (no mainline driver at all). The VEPU540 is the production encoder capable of 1080p60 H.264/H.265. The MPP reference code provides an excellent register-level reference with clean bitfield structures, and the RK3568 TRM Part 2 is publicly available. The V4L2 stateless encoding uAPI is still in RFC stage (most recent: Marco Felsch's VC8000E RFC, May 2025), but this is an accepted maintenance cost — the driver can be updated as the API evolves, and waiting for stabilization leaves users without a solution indefinitely. Community demand is strong (30+ threads across GitHub, forums, and wikis, driven heavily by Home Assistant Green users), and ~5,000-6,000 lines of new kernel code would be needed. The recommendation is **go**: begin development immediately, ship an out-of-tree driver to unblock users, and track the uAPI as it matures toward upstream inclusion.
 
 ---
 
@@ -282,11 +282,11 @@ The Samsung MFC at ~14,000 total lines supports 6+ HW generations and 5 codecs. 
 
 ### High Risk
 
-1. **Unstable uAPI**: The V4L2 stateless encoding uAPI is still in RFC stage. Writing a driver against it means potentially major rewrites as the API evolves. The most recent RFC (VC8000E, May 2025) self-describes as "very very early state." No timeline for finalization.
+1. **Unstable uAPI (accepted)**: The V4L2 stateless encoding uAPI is still in RFC stage. The most recent RFC (VC8000E, May 2025) self-describes as "very very early state." Writing against it means tracking API changes and adapting. This is an accepted maintenance cost — the alternative is leaving users without hardware encoding indefinitely. The hardware-specific register programming (~60% of the driver) is unaffected by uAPI changes.
 
-2. **Rate control design unsettled**: The kernel community hasn't agreed on where rate control should live. Options discussed: purely userspace, kernel-side, or BPF programs. This is a fundamental architectural question that affects driver design.
+2. **Rate control design unsettled**: The kernel community hasn't agreed on where rate control should live. Options discussed: purely userspace, kernel-side, or BPF programs. For the initial driver, implement userspace rate control via exposed QP controls. This can be refactored later once a consensus emerges.
 
-3. **MPP DMCA status**: The primary reference implementation (`rockchip-linux/mpp`) was DMCA'd by FFmpeg in December 2025. While forks exist, the legal status of using MPP as a reference is murky. The DMCA was about copied FFmpeg code, not about register definitions, but a cautious developer might want legal review.
+3. **MPP DMCA status**: The primary reference implementation (`rockchip-linux/mpp`) was DMCA'd by FFmpeg in December 2025. While forks exist, the legal status of using MPP as a reference is murky. The DMCA targeted copied FFmpeg LGPL code, not Rockchip's own register definitions or HAL code. Register headers and hardware programming sequences are Rockchip's original work and safe to reference.
 
 ### Medium Risk
 
@@ -308,31 +308,58 @@ The Samsung MFC at ~14,000 total lines supports 6+ HW generations and 5 codecs. 
 
 ## Recommendation
 
-### Verdict: Conditional Go
+### Verdict: Go
 
-**Start prototyping now, target upstream submission when the stateless encoding uAPI stabilizes.**
+**Build the driver now. Ship an out-of-tree solution to unblock users. Track the uAPI and upstream when it stabilizes.**
 
 #### Reasoning
 
-1. **The demand is real and growing.** 30+ community threads, driven by the Home Assistant Green (mainstream consumer product) and self-hosted media server use cases. This isn't niche hobbyist territory.
+1. **The demand is real and growing.** 30+ community threads, driven by the Home Assistant Green (mainstream consumer product) and self-hosted media server use cases. This isn't niche hobbyist territory. Users need this now.
 
 2. **The reference materials are excellent.** The MPP register headers, the RK3568 TRM Part 2, and the clean pipeline structure in the MPP HAL make this more approachable than most embedded encoder bring-up projects.
 
-3. **The uAPI is the blocker, not the hardware.** The V4L2 stateless encoder uAPI must stabilize before any encoder driver can be merged upstream. Working on the hardware-specific parts now means you'll be ready to submit when the API is ready.
+3. **The uAPI instability is a maintenance cost, not a blocker.** The hardware register programming — the bulk of the driver work — is independent of the V4L2 uAPI. uAPI changes affect the V4L2 glue layer, which is a bounded refactor. Waiting for a "stable" API that has no timeline leaves users stranded.
 
 4. **Multi-SoC benefit.** A VEPU540 driver would cover RK3566, RK3568, and RV1126 — three SoCs with one driver. This increases the value proposition.
 
-#### Suggested Approach
+5. **First-mover advantage.** No one else is working on this. Shipping a working out-of-tree driver builds community goodwill and positions the project to be the upstream submission when the time comes.
 
-1. **Phase 1 (now)**: Build an out-of-tree prototype targeting the latest stateless encoder uAPI RFC. Use the VC8000E RFC series (May 2025) as the API template. Focus on H.264 Baseline/Main profile, I/P frames only.
+#### Implementation Roadmap
 
-2. **Phase 2 (when uAPI stabilizes)**: Adapt to the finalized API. Add H.265 support. Add full control set (rate control, ROI, slice splitting). Write DT bindings.
+##### Phase 1: MVP — H.264 Baseline/Main (target: working encode)
+- Translate VEPU540 register headers from MPP to kernel register structures
+- Platform driver: probe/remove, DT binding, power domain, clocks
+- V4L2 m2m skeleton targeting the latest stateless encoder uAPI RFC (VC8000E series)
+- HW register programming for H.264 I/P frames: `gen_regs` pipeline from MPP
+- Userspace rate control via exposed QP controls
+- Out-of-tree build with DKMS support for immediate user deployment
+- **Deliverable**: Encode NV12 input to H.264 elementary stream on RK3566/RK3568
 
-3. **Phase 3 (upstream)**: Submit RFC to linux-media, incorporating feedback. Target inclusion once the stateless encoder framework lands.
+##### Phase 2: Production Quality — H.264 High Profile + H.265
+- H.264 High profile (8x8 transform, CABAC)
+- H.265/HEVC encoding path
+- Full V4L2 control set: slice splitting, deblocking filter configuration, long-term references
+- ROI encoding support
+- Interrupt-driven completion (replace polling)
+- Comprehensive error handling and recovery
+- **Deliverable**: Feature-complete encoder suitable for Jellyfin/Frigate/go2rtc integration
 
-#### Alternative: VEPU121 H.264 Path
+##### Phase 3: Upstream Submission
+- Adapt to finalized V4L2 stateless encoder uAPI (when available)
+- Write conformance tests against v4l2-compliance
+- Submit RFC to linux-media mailing list
+- Iterate on review feedback from Collabora/Pengutronix/Bootlin maintainers
+- DT binding review via devicetree mailing list
+- **Deliverable**: Merged mainline driver
 
-A lower-risk alternative is extending the existing Hantro/Verisilicon driver with H.264 encoding support for the VEPU121 block. Bootlin's out-of-tree work provides a starting point, and the Hantro driver framework already exists in mainline. However, the VEPU121 reportedly produced unusable H.264 output on RK3566 when tested, and even if fixed, the VEPU121 is a simpler encoder that likely won't match the VEPU540's quality and performance at 1080p60. This path has lower risk but also lower reward.
+##### Parallel: Userspace Integration
+- FFmpeg V4L2 stateless encoder plugin (or patches to existing V4L2 encoder support)
+- GStreamer V4L2 encoder element testing
+- Integration guides for Jellyfin, Frigate, go2rtc, Home Assistant
+
+#### Deprioritized: VEPU121 H.264 Path
+
+Extending the existing Hantro/Verisilicon driver with H.264 encoding for the VEPU121 block is not worth pursuing. The VEPU121 reportedly produced unusable H.264 output on RK3566 when tested, and even if fixed, it cannot match the VEPU540's quality and performance at 1080p60. The VEPU540 is the right target.
 
 ---
 
