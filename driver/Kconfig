@@ -1,0 +1,16 @@
+config VIDEO_ROCKCHIP_RKVENC
+	tristate "Rockchip RKVENC H.264/HEVC encoder driver"
+	depends on ARCH_ROCKCHIP || COMPILE_TEST
+	depends on VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Support for the RKVENC (VEPU540) hardware video encoder found in
+	  Rockchip RK3566, RK3568, and RV1126 SoCs.
+
+	  Supports H.264 encoding at up to 1080p60 via the V4L2 M2M API.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rkvenc.
