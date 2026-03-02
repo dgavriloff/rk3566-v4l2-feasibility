@@ -1,2 +1,3 @@
 *.o
 sim_test
+sim_output.h264

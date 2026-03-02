@@ -532,6 +532,308 @@ static void test_free_aux_bufs(void)
 }
 
 /* ================================================================
+ * H.264 NAL unit generation tests
+ * ================================================================ */
+
+#include "h264_nalu.h"
+
+/* Scratch buffer for NAL output */
+static uint8_t nalu_buf[4096];
+
+static void test_bitstream_writer(void)
+{
+	struct bs_writer bs;
+	uint8_t tmp[32];
+
+	fprintf(stderr, "\n--- test_bitstream_writer ---\n");
+
+	/* ue(0) = 1 (1 bit) */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_ue(&bs, 0);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("ue(0) first byte", tmp[0], 0xC0);  /* 1 1000000 */
+
+	/* ue(1) = 010 (3 bits) */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_ue(&bs, 1);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("ue(1) first byte", tmp[0], 0x50);  /* 010 10000 */
+
+	/* ue(5) = 00110 (5 bits), + trailing 100 = 00110100 = 0x34 */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_ue(&bs, 5);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("ue(5) first byte", tmp[0], 0x34);
+
+	/* se(-1) → mapped=2 → ue(2) = 011 (3 bits) */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_se(&bs, -1);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("se(-1) first byte", tmp[0], 0x70);  /* 011 10000 */
+
+	/* se(1) → mapped=1 → ue(1) = 010 (3 bits) */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_se(&bs, 1);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("se(1) first byte", tmp[0], 0x50);  /* 010 10000 */
+
+	/* Multi-bit packing: 8 bits then ue */
+	bs_init(&bs, tmp, sizeof(tmp));
+	bs_put_bits(&bs, 8, 0xAB);
+	bs_put_ue(&bs, 0);
+	bs_trailing_bits(&bs);
+	ASSERT_EQ("8-bit + ue(0) byte 0", tmp[0], 0xAB);
+	ASSERT_EQ("8-bit + ue(0) byte 1", tmp[1], 0xC0);
+}
+
+static void test_sps_generation(void)
+{
+	size_t len;
+	struct h264_sps_params sps = {
+		.profile_idc = 100,      /* High */
+		.level_idc = 40,         /* 4.0 */
+		.log2_max_frame_num = 4,
+		.log2_max_poc_lsb = 4,
+		.mb_width = 120,         /* 1920/16 */
+		.mb_height = 68,         /* 1088/16 */
+		.transform_8x8 = true,
+		.crop_bottom = 8,        /* 1088-1080 = 8 */
+	};
+
+	fprintf(stderr, "\n--- test_sps_generation ---\n");
+
+	len = h264_write_sps(nalu_buf, sizeof(nalu_buf), &sps);
+
+	fprintf(stderr, "  SPS NAL: %zu bytes\n", len);
+	ASSERT_TRUE("SPS length > 4 (start code)", len > 4);
+
+	/* Verify Annex B start code */
+	ASSERT_EQ("start code [0]", nalu_buf[0], 0x00);
+	ASSERT_EQ("start code [1]", nalu_buf[1], 0x00);
+	ASSERT_EQ("start code [2]", nalu_buf[2], 0x00);
+	ASSERT_EQ("start code [3]", nalu_buf[3], 0x01);
+
+	/* NAL header: forbidden=0, ref_idc=3, type=7 → 0x67 */
+	ASSERT_EQ("NAL header = 0x67 (SPS)", nalu_buf[4], 0x67);
+
+	/* profile_idc = 100 = 0x64 */
+	ASSERT_EQ("profile_idc = 0x64 (High)", nalu_buf[5], 0x64);
+
+	/* constraint_set flags = 0x00 for High */
+	ASSERT_EQ("constraints = 0x00", nalu_buf[6], 0x00);
+
+	/* level_idc = 40 = 0x28 */
+	ASSERT_EQ("level_idc = 0x28", nalu_buf[7], 0x28);
+
+	/* Test Baseline profile too */
+	sps.profile_idc = 66;
+	sps.transform_8x8 = false;
+	sps.crop_bottom = 0;
+	sps.mb_height = 67;  /* exact: no cropping needed for e.g. 1072 */
+
+	len = h264_write_sps(nalu_buf, sizeof(nalu_buf), &sps);
+	ASSERT_EQ("Baseline NAL header", nalu_buf[4], 0x67);
+	ASSERT_EQ("Baseline profile_idc", nalu_buf[5], 0x42);
+	ASSERT_EQ("Baseline constraints", nalu_buf[6], 0xC0);
+
+	fprintf(stderr, "  Baseline SPS: %zu bytes\n", len);
+}
+
+static void test_pps_generation(void)
+{
+	size_t len;
+	struct h264_pps_params pps = {
+		.profile_idc = 100,
+		.entropy_cabac = true,
+		.transform_8x8 = true,
+		.pic_init_qp_minus26 = 0,
+		.chroma_qp_index_offset = 0,
+	};
+
+	fprintf(stderr, "\n--- test_pps_generation ---\n");
+
+	len = h264_write_pps(nalu_buf, sizeof(nalu_buf), &pps);
+
+	fprintf(stderr, "  PPS NAL: %zu bytes\n", len);
+	ASSERT_TRUE("PPS length > 4", len > 4);
+
+	/* Start code */
+	ASSERT_EQ("start code [3]", nalu_buf[3], 0x01);
+
+	/* NAL header: forbidden=0, ref_idc=3, type=8 → 0x68 */
+	ASSERT_EQ("NAL header = 0x68 (PPS)", nalu_buf[4], 0x68);
+}
+
+static void test_slice_header(void)
+{
+	size_t len;
+	struct h264_slice_params sl = {
+		.is_idr = true,
+		.slice_type = 2,        /* I */
+		.frame_num = 0,
+		.idr_pic_id = 0,
+		.poc_lsb = 0,
+		.log2_max_frame_num = 4,
+		.log2_max_poc_lsb = 4,
+		.entropy_cabac = true,
+		.cabac_init_idc = 0,
+		.slice_qp_delta = 0,
+		.nal_ref_idc = 3,
+		.dbf_dis_idc = 0,
+		.dbf_alpha = 0,
+		.dbf_beta = 0,
+	};
+
+	fprintf(stderr, "\n--- test_slice_header ---\n");
+
+	len = h264_write_slice_header(nalu_buf, sizeof(nalu_buf), &sl);
+	fprintf(stderr, "  IDR slice header: %zu bytes\n", len);
+
+	/* NAL header: ref_idc=3, type=5 → 0x65 */
+	ASSERT_EQ("IDR NAL header = 0x65", nalu_buf[4], 0x65);
+
+	/* P-frame slice */
+	sl.is_idr = false;
+	sl.slice_type = 0;   /* P */
+	sl.frame_num = 1;
+	sl.poc_lsb = 2;
+	sl.nal_ref_idc = 2;
+	sl.cabac_init_idc = 1;
+
+	len = h264_write_slice_header(nalu_buf, sizeof(nalu_buf), &sl);
+	fprintf(stderr, "  P slice header: %zu bytes\n", len);
+
+	/* NAL header: ref_idc=2, type=1 → 0x41 */
+	ASSERT_EQ("P NAL header = 0x41", nalu_buf[4], 0x41);
+}
+
+/*
+ * End-to-end test: generate a multi-frame .h264 file.
+ *
+ * Structure: [SPS][PPS][IDR][P][P][P]
+ *
+ * The slice data is dummy (just the header + trailing), but the
+ * parameter sets and NAL structure are spec-compliant.  This file
+ * should parse with ffprobe showing the correct codec parameters.
+ */
+#define H264_OUT_FILE  "sim_output.h264"
+#define GOP_FRAMES     4  /* 1 IDR + 3 P */
+
+static void test_h264_file_output(void)
+{
+	FILE *fp;
+	uint8_t out[8192];
+	size_t pos = 0;
+	size_t len;
+	int i;
+
+	fprintf(stderr, "\n--- test_h264_file_output ---\n");
+
+	/* SPS: 1920x1080 High profile, Level 4.0 */
+	struct h264_sps_params sps = {
+		.profile_idc = 100,
+		.level_idc = 40,
+		.log2_max_frame_num = 4,
+		.log2_max_poc_lsb = 4,
+		.mb_width = 120,
+		.mb_height = 68,
+		.transform_8x8 = true,
+		.crop_bottom = 8,
+	};
+
+	struct h264_pps_params pps = {
+		.profile_idc = 100,
+		.entropy_cabac = true,
+		.transform_8x8 = true,
+		.pic_init_qp_minus26 = 0,
+		.chroma_qp_index_offset = 0,
+	};
+
+	/* Write SPS */
+	len = h264_write_sps(out + pos, sizeof(out) - pos, &sps);
+	fprintf(stderr, "  SPS: %zu bytes @ offset %zu\n", len, pos);
+	pos += len;
+
+	/* Write PPS */
+	len = h264_write_pps(out + pos, sizeof(out) - pos, &pps);
+	fprintf(stderr, "  PPS: %zu bytes @ offset %zu\n", len, pos);
+	pos += len;
+
+	/* Write GOP: IDR + P frames */
+	for (i = 0; i < GOP_FRAMES; i++) {
+		struct h264_slice_params sl = {
+			.is_idr = (i == 0),
+			.slice_type = (i == 0) ? 2 : 0,
+			.frame_num = (uint16_t)(i == 0 ? 0 : i),
+			.idr_pic_id = 0,
+			.poc_lsb = (uint16_t)(i * 2),
+			.log2_max_frame_num = 4,
+			.log2_max_poc_lsb = 4,
+			.entropy_cabac = true,
+			.cabac_init_idc = 0,
+			.slice_qp_delta = 0,
+			.nal_ref_idc = (uint8_t)(i == 0 ? 3 : 2),
+			.dbf_dis_idc = 0,
+			.dbf_alpha = 0,
+			.dbf_beta = 0,
+		};
+
+		len = h264_write_slice_header(out + pos,
+					      sizeof(out) - pos, &sl);
+		fprintf(stderr, "  %s: %zu bytes @ offset %zu\n",
+			i == 0 ? "IDR" : "P", len, pos);
+		pos += len;
+	}
+
+	fprintf(stderr, "  Total: %zu bytes, %d NALUs\n",
+		pos, 2 + GOP_FRAMES);
+
+	/* Validate structure: scan for start codes and check NAL types */
+	{
+		size_t sc_pos[16];
+		uint8_t nal_types[16];
+		int nalu_count = 0;
+		size_t j;
+
+		for (j = 0; j + 3 < pos; j++) {
+			if (out[j] == 0 && out[j+1] == 0 &&
+			    out[j+2] == 0 && out[j+3] == 1) {
+				if (nalu_count < 16) {
+					sc_pos[nalu_count] = j;
+					nal_types[nalu_count] =
+						out[j+4] & 0x1F;
+					nalu_count++;
+				}
+				j += 3;
+			}
+		}
+
+		ASSERT_EQ("NALU count", nalu_count, 2 + GOP_FRAMES);
+		ASSERT_EQ("NALU[0] = SPS (7)", nal_types[0], 7);
+		ASSERT_EQ("NALU[1] = PPS (8)", nal_types[1], 8);
+		ASSERT_EQ("NALU[2] = IDR (5)", nal_types[2], 5);
+
+		for (i = 3; i < nalu_count; i++)
+			ASSERT_EQ("NALU[n] = non-IDR (1)",
+				  nal_types[i], 1);
+
+		(void)sc_pos;  /* used for debug if needed */
+	}
+
+	/* Write file */
+	fp = fopen(H264_OUT_FILE, "wb");
+	if (fp) {
+		fwrite(out, 1, pos, fp);
+		fclose(fp);
+		fprintf(stderr, "  Wrote %s (%zu bytes)\n",
+			H264_OUT_FILE, pos);
+	} else {
+		fprintf(stderr, "  Warning: could not write %s\n",
+			H264_OUT_FILE);
+	}
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -542,12 +844,20 @@ int main(void)
 
 	setup_test_env();
 
+	/* Register programming tests */
 	test_version_read();
 	test_alloc_aux_bufs();
 	test_idr_encode();
 	test_p_frame_encode();
 	test_baseline_restrictions();
 	test_free_aux_bufs();
+
+	/* H.264 NAL generation tests */
+	test_bitstream_writer();
+	test_sps_generation();
+	test_pps_generation();
+	test_slice_header();
+	test_h264_file_output();
 
 	fprintf(stderr, "\n================================\n");
 	fprintf(stderr, "Results: %d/%d passed, %d failed\n",

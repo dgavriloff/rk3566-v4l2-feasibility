@@ -5,7 +5,7 @@ CFLAGS  := -Wall -Wextra -Werror -g -O1 \
            -I.
 
 TARGET  := sim_test
-SRCS    := sim_hw.c sim_test.c
+SRCS    := sim_hw.c h264_nalu.c sim_test.c
 OBJS    := $(SRCS:.c=.o)
 
 .PHONY: all clean run
@@ -18,11 +18,14 @@ $(TARGET): $(OBJS)
 sim_hw.o: sim_hw.c kstubs.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-sim_test.o: sim_test.c kstubs.h ../driver/rkvenc_regs.h ../driver/rkvenc_h264.c
+h264_nalu.o: h264_nalu.c h264_nalu.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+sim_test.o: sim_test.c kstubs.h h264_nalu.h ../driver/rkvenc_regs.h ../driver/rkvenc_h264.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 run: $(TARGET)
 	./$(TARGET)
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) sim_output.h264
