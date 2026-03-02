@@ -102,6 +102,18 @@ static void rkvenc_free_aux_buf(struct rkvenc_dev *rkvenc,
 	}
 }
 
+void rkvenc_h264_free_aux_bufs(struct rkvenc_ctx *ctx)
+{
+	struct rkvenc_dev *rkvenc = ctx->dev;
+	int i;
+
+	rkvenc_free_aux_buf(rkvenc, &ctx->me_buf);
+	for (i = 0; i < RKVENC_NUM_RECON_BUFS; i++) {
+		rkvenc_free_aux_buf(rkvenc, &ctx->recon[i]);
+		rkvenc_free_aux_buf(rkvenc, &ctx->mv_buf[i]);
+	}
+}
+
 /*
  * Allocate internal buffers needed for encoding:
  * - 2 reconstruction frames (ping-pong)
@@ -165,18 +177,6 @@ int rkvenc_h264_alloc_aux_bufs(struct rkvenc_ctx *ctx)
 err_free:
 	rkvenc_h264_free_aux_bufs(ctx);
 	return ret;
-}
-
-void rkvenc_h264_free_aux_bufs(struct rkvenc_ctx *ctx)
-{
-	struct rkvenc_dev *rkvenc = ctx->dev;
-	int i;
-
-	rkvenc_free_aux_buf(rkvenc, &ctx->me_buf);
-	for (i = 0; i < RKVENC_NUM_RECON_BUFS; i++) {
-		rkvenc_free_aux_buf(rkvenc, &ctx->recon[i]);
-		rkvenc_free_aux_buf(rkvenc, &ctx->mv_buf[i]);
-	}
 }
 
 /*
