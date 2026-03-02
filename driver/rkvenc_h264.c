@@ -12,6 +12,7 @@
  * Copyright (c) 2026 rk3566-v4l2-feasibility contributors
  */
 
+#include <linux/bitfield.h>
 #include <linux/dma-mapping.h>
 #include <linux/kernel.h>
 #include <linux/minmax.h>

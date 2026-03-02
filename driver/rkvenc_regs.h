@@ -18,6 +18,7 @@
 #ifndef _RKVENC_REGS_H_
 #define _RKVENC_REGS_H_
 
+#include <linux/bitfield.h>
 #include <linux/bits.h>
 
 /* Total number of L1 registers */

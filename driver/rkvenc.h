@@ -242,6 +242,8 @@ static inline void rkvenc_write_regs(struct rkvenc_dev *rkvenc,
 /* Function declarations — rkvenc_v4l2.c */
 int rkvenc_v4l2_register(struct rkvenc_dev *rkvenc);
 void rkvenc_v4l2_unregister(struct rkvenc_dev *rkvenc);
+int rkvenc_queue_init(void *priv, struct vb2_queue *src_vq,
+		      struct vb2_queue *dst_vq);
 
 /* Function declarations — rkvenc_h264.c */
 int rkvenc_h264_alloc_aux_bufs(struct rkvenc_ctx *ctx);
